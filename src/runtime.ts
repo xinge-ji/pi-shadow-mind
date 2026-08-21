@@ -29,6 +29,9 @@ export class ShadowMindRuntime {
   private readonly recentEvents: RuntimeEvent[] = [];
   private readonly batcher: ReportBatcher;
   private readonly sessionLifetime = new SessionLifetime();
+  private bufferedReports: ShadowReport[] = [];
+  private compactionGeneration = 0;
+  private compactionInProgress = false;
   private epoch = 0;
   private modelCalls = 0;
   private paused = false;
@@ -52,6 +55,7 @@ export class ShadowMindRuntime {
     this.pi.on("session_start", async (_event, ctx) => {
       this.sessionLifetime.activate();
       this.latestContext = ctx;
+      this.resetCompactionState();
       this.modelCalls = 0;
       await this.configStore.initialize();
       this.random = createRandom(this.configStore.current.randomSeed);
@@ -82,6 +86,27 @@ export class ShadowMindRuntime {
       await this.onHeartbeat(ctx);
     });
 
+    this.pi.on("session_before_compact", (event, ctx) => {
+      this.latestContext = ctx;
+      this.beginCompaction(event.signal);
+    });
+
+    this.pi.on("session_compact", (_event, ctx) => {
+      this.latestContext = ctx;
+      this.finishCompaction();
+    });
+
+    // Pi versions that expose the failure event can release buffered reports after
+    // failed compaction too. Older versions still release on success or abort.
+    const onCompactionFailure = this.pi.on.bind(this.pi) as (
+      event: string,
+      handler: (event: unknown, ctx: ExtensionContext) => void,
+    ) => void;
+    onCompactionFailure("session_compact_failed", (_event, ctx) => {
+      this.latestContext = ctx;
+      this.finishCompaction();
+    });
+
     this.pi.on("session_shutdown", async (event, ctx) => {
       this.latestContext = ctx;
       if (event.reason === "quit" && (ctx.mode === "print" || ctx.mode === "json")) {
@@ -89,6 +114,7 @@ export class ShadowMindRuntime {
       }
       this.epoch += 1;
       this.abortAll("session-shutdown");
+      this.resetCompactionState();
       ctx.ui.setStatus("shadow-mind", undefined);
       ctx.ui.setWidget("shadow-mind-panel", undefined);
       this.sessionLifetime.deactivate();
@@ -224,9 +250,14 @@ export class ShadowMindRuntime {
     this.batcher.add(report);
   }
 
-  private async deliverReports(reports: ShadowReport[]): Promise<void> {
+  private deliverReports(reports: ShadowReport[]): void {
     const current = reports.filter((report) => report.epoch === this.epoch);
     if (!current.length) return;
+    if (this.compactionInProgress) {
+      this.bufferedReports.push(...current);
+      return;
+    }
+
     const content = formatReportBatch(current);
     this.record("report-delivered", { runIds: current.map((report) => report.runId), count: current.length });
     const idle = this.latestContext?.isIdle() ?? true;
@@ -238,6 +269,32 @@ export class ShadowMindRuntime {
         details: { reports: current.map(({ shadowId, runId }) => ({ shadowId, runId })) },
       }, { triggerTurn: true, deliverAs: idle ? "followUp" : "steer" });
     });
+  }
+
+  private beginCompaction(signal: AbortSignal): void {
+    const generation = ++this.compactionGeneration;
+    this.compactionInProgress = true;
+    signal.addEventListener("abort", () => {
+      if (generation === this.compactionGeneration) this.finishCompaction();
+    }, { once: true });
+  }
+
+  private finishCompaction(): void {
+    if (!this.compactionInProgress) return;
+    const generation = this.compactionGeneration;
+    this.compactionInProgress = false;
+    setImmediate(() => {
+      if (generation !== this.compactionGeneration || this.compactionInProgress) return;
+      const reports = this.bufferedReports;
+      this.bufferedReports = [];
+      this.deliverReports(reports);
+    });
+  }
+
+  private resetCompactionState(): void {
+    this.compactionGeneration += 1;
+    this.compactionInProgress = false;
+    this.bufferedReports = [];
   }
 
   private async refresh(ctx: ExtensionContext): Promise<void> {

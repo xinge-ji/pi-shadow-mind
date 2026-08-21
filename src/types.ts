@@ -22,6 +22,8 @@ export interface ShadowDefinition {
   activeForModels: string[];
   runWithModel?: string;
   thinkingLevel?: ThinkingLevel;
+  fallbackModel?: string;
+  fallbackModelThinkingLevel?: ThinkingLevel;
   timeoutSeconds?: number;
   tools: string[];
   prompt: string;

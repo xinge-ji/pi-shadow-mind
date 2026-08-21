@@ -82,6 +82,8 @@ debug: false
 activation_probability: 0.6
 run_with_model: openai/gpt-5-mini
 thinking_level: low
+fallback_model: openai/gpt-5-mini
+fallback_model_thinking_level: low
 timeout_seconds: 120
 tools:
   - read
@@ -106,18 +108,20 @@ active_for_models:
 | `debug` | 是否保存完整 Shadow Session 日志；默认 `false` |
 | `activation_probability` | 每次 heartbeat 时独立激活的概率，范围为 `0` 到 `1`；默认 `0.3` |
 | `active_for_models` | 适用于哪些 Main 模型；`"*"` 表示全部模型，省略时默认 `["*"]` |
-| `run_with_model` | Shadow 自己使用的模型；省略时使用插件默认模型 |
-| `thinking_level` | Shadow 使用的 thinking level；省略时使用插件默认值，再回退到 Main 会话当前生效等级 |
+| `run_with_model` | Shadow 首次运行使用的模型；省略时使用插件默认模型 |
+| `thinking_level` | Shadow 首次运行使用的 thinking level；省略时使用插件默认值，再回退到 Main 会话当前生效等级 |
+| `fallback_model` | 首次运行返回 `error` 时重试使用的模型；省略时不重试 |
+| `fallback_model_thinking_level` | fallback 重试使用的 thinking level；省略时继承 `thinking_level`，再按常规候选回退 |
 | `timeout_seconds` | Shadow 单次运行超时；省略时使用插件默认超时 |
 | `tools` | 在 Pi SDK `readOnlyTools` 之上追加的工具白名单；默认 `[]` |
 
 `name` 只用于 `shadow-report` 和状态界面展示，不参与身份判断；省略时回退到最终解析出的 `id`。Markdown 正文就是 Shadow 的认知定义、长期职责和行为要求。
 
-`active_for_models` 绑定的是被观察的 Main 模型，`run_with_model` 则指定 Shadow 自己运行时使用的模型。匹配前由 Pi 将 Main 的别名或简写解析为完整 `provider/model-id`；第一版只支持该完整 ID 和精确值 `"*"`，不引入其他通配、正则、标签或复杂条件。模型选择优先级为：Shadow 的 `run_with_model` → 插件的 `default_shadow_model` → 激活时的当前 Main 模型。
+`active_for_models` 绑定的是被观察的 Main 模型，`run_with_model` 则指定 Shadow 首次运行时使用的模型。匹配前由 Pi 将 Main 的别名或简写解析为完整 `provider/model-id`；第一版只支持该完整 ID 和精确值 `"*"`，不引入其他通配、正则、标签或复杂条件。首次运行的模型选择优先级为：Shadow 的 `run_with_model` → 插件的 `default_shadow_model` → 激活时的当前 Main 模型。
 
-如果显式配置的 `run_with_model` 当前不存在、未认证或不可用，本次激活失败并写入轻量运行事件，不自动换用其他模型。只有省略该字段时才使用插件默认 Shadow 模型。
+如果配置的首次运行模型不存在、未认证、上下文不足、thinking level 不支持或运行过程中返回 `error`，且配置了 `fallback_model`，插件会使用 fallback 模型重新创建 Shadow Session 并重试一次。Shadow Session 不继承 Main 会话的自动重试策略：会关闭 AgentSession retry、provider retry，并排除 `pi-retry` 扩展；这些覆盖只作用于 Shadow，不改变 Main 会话。`timeout`、外部 `abort`、静默结束和已经提交报告都不会触发重试；没有配置 fallback，或 fallback 本身失败时，本次激活结束并记录最终原因。
 
-`thinking_level` 的选择优先级为：Shadow 自身配置 → 插件的 `default_thinking_level` → 激活时 Main 会话当前生效的 thinking level。所选模型不支持当前候选等级时，依序尝试下一个候选；全部候选都不支持时本次激活失败并记录原因。这样当插件默认等级不被 Shadow 执行模型支持（例如只支持高推理档位的闪速模型）时，Shadow 会自动回退到 Main 正在使用的等级，而不是无谓失败。实际生效的等级记录在 run-end 事件中。
+首次运行的 `thinking_level` 选择优先级为：Shadow 自身配置 → 插件的 `default_thinking_level` → 激活时 Main 会话当前生效的 thinking level。fallback 重试则优先使用 `fallback_model_thinking_level`，省略时继承 Shadow 的 `thinking_level`，再按同一候选顺序回退。所选模型不支持当前候选等级时，依序尝试下一个候选；全部候选都不支持时本次尝试失败并记录原因。实际生效的等级记录在 run-end 事件中。
 
 每个 Shadow 的最终工具集合由三部分组成：
 

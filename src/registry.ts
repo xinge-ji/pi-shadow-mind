@@ -83,7 +83,9 @@ export function parseShadowMarkdown(source: string, filePath: string): ShadowDef
     activationProbability: probabilityValue(value.activation_probability, 0.3, "activation_probability"),
     activeForModels: stringArray(value.active_for_models, ["*"], "active_for_models"),
     runWithModel: optionalString(value.run_with_model, "run_with_model"),
-    thinkingLevel: optionalThinking(value.thinking_level),
+    thinkingLevel: optionalThinking(value.thinking_level, "thinking_level"),
+    fallbackModel: optionalString(value.fallback_model, "fallback_model"),
+    fallbackModelThinkingLevel: optionalThinking(value.fallback_model_thinking_level, "fallback_model_thinking_level"),
     timeoutSeconds: optionalPositiveNumber(value.timeout_seconds, "timeout_seconds"),
     tools: stringArray(value.tools, [], "tools"),
     prompt,
@@ -119,8 +121,8 @@ function stringArray(value: unknown, fallback: string[], name: string): string[]
   if (!isStringArray(value)) throw new Error(`${name} must be an array of non-empty strings`);
   return [...new Set(value.map((item) => item.trim()))];
 }
-function optionalThinking(value: unknown): ThinkingLevel | undefined {
+function optionalThinking(value: unknown, name: string): ThinkingLevel | undefined {
   if (value === undefined) return undefined;
-  if (!isThinkingLevel(value)) throw new Error("thinking_level is invalid");
+  if (!isThinkingLevel(value)) throw new Error(`${name} is invalid`);
   return value;
 }

@@ -20,7 +20,7 @@ const mock = vi.hoisted(() => {
     sessionFile = "/tmp/fake/session.jsonl";
     aborted = false;
     disposed = false;
-    behavior: "silent" | "report" | "tools" | "throw" | "hang" = "silent";
+    behavior: "silent" | "report" | "tools" | "throw" | "assistant-error" | "hang" = "silent";
     promptError: Error | undefined;
     options: any;
     private release?: (err?: Error) => void;
@@ -42,6 +42,10 @@ const mock = vi.hoisted(() => {
       }
       if (this.behavior === "throw") {
         throw this.promptError ?? new Error("prompt failed");
+      }
+      if (this.behavior === "assistant-error") {
+        this.messages.push({ role: "assistant", content: [], stopReason: "error", errorMessage: "provider failed" });
+        return;
       }
       if (this.behavior === "report") {
         // Simulate the model calling the (real) built-in report_to_main tool.
@@ -180,10 +184,15 @@ describe("ShadowRunner.run integration", () => {
     const runner = new ShadowRunner();
     const onReport = vi.fn();
     behavior = "hang";
-    const result = await runner.run(makeRequest({ onReport, config: { ...makeRequest().config, defaultShadowTimeoutSeconds: 0.05 } }));
+    const result = await runner.run(makeRequest({
+      onReport,
+      shadow: { ...makeRequest().shadow, fallbackModel: "test/fallback" },
+      config: { ...makeRequest().config, defaultShadowTimeoutSeconds: 0.05 },
+    }));
     const session = mock.sessions[0];
     expect(result.reason).toBe("timeout");
     expect(result.durationMs).toBeGreaterThan(0);
+    expect(mock.sessions).toHaveLength(1);
     expect(session.aborted).toBe(true);
     expect(onReport).not.toHaveBeenCalled();
   });
@@ -197,6 +206,77 @@ describe("ShadowRunner.run integration", () => {
     expect(result.reason).toBe("error");
     expect(result.error).toBe("boom");
     expect(session.disposed).toBe(true);
+  });
+
+  it("retries with the fallback model after a primary model error", async () => {
+    const runner = new ShadowRunner();
+    const primaryModel = { ...fakeModel, id: "primary", thinkingLevelMap: { low: "low" } } as any;
+    const fallbackModel = { ...fakeModel, id: "fallback", thinkingLevelMap: { high: "high" } } as any;
+    let attempts = 0;
+    mock.createAgentSession.mockReset();
+    mock.createAgentSession.mockImplementation(async (options: any) => {
+      const session = new mock.FakeSession(options);
+      session.behavior = attempts++ === 0 ? "assistant-error" : "silent";
+      mock.sessions.push(session);
+      return { session, extensionsResult: {} as any };
+    });
+
+    const result = await runner.run(makeRequest({
+      shadow: {
+        ...makeRequest().shadow,
+        runWithModel: "test/primary",
+        thinkingLevel: "low",
+        fallbackModel: "test/fallback",
+        fallbackModelThinkingLevel: "high",
+      },
+      resolveModel: (id) => id === "test/primary" ? primaryModel : id === "test/fallback" ? fallbackModel : undefined,
+    }));
+
+    expect(result.reason).toBe("silent");
+    expect(mock.sessions).toHaveLength(2);
+    expect(mock.sessions[0].options.model).toBe(primaryModel);
+    expect(mock.sessions[0].options.thinkingLevel).toBe("low");
+    expect(mock.sessions[0].disposed).toBe(true);
+    expect(mock.sessions[1].options.model).toBe(fallbackModel);
+    expect(mock.sessions[1].options.thinkingLevel).toBe("high");
+    expect(mock.sessions[1].disposed).toBe(true);
+  });
+
+  it("closes both debug sessions when fallback is used", async () => {
+    const runner = new ShadowRunner();
+    const primaryModel = { ...fakeModel, id: "primary", thinkingLevelMap: { low: "low" } } as any;
+    const fallbackModel = { ...fakeModel, id: "fallback", thinkingLevelMap: { low: "low" } } as any;
+    let attempts = 0;
+    mock.createAgentSession.mockReset();
+    mock.createAgentSession.mockImplementation(async (options: any) => {
+      const session = new mock.FakeSession(options);
+      session.behavior = attempts++ === 0 ? "assistant-error" : "silent";
+      mock.sessions.push(session);
+      return { session, extensionsResult: {} as any };
+    });
+
+    const result = await runner.run(makeRequest({
+      shadow: {
+        ...makeRequest().shadow,
+        debug: true,
+        runWithModel: "test/primary",
+        fallbackModel: "test/fallback",
+      },
+      resolveModel: (id) => id === "test/primary" ? primaryModel : id === "test/fallback" ? fallbackModel : undefined,
+    }));
+
+    const markers = mock.sessions.map((session) => {
+      const entries = session.options.sessionManager.getEntries();
+      return {
+        starts: entries.filter((entry: any) => entry.type === "custom" && entry.customType === "shadow-mind-run"),
+        ends: entries.filter((entry: any) => entry.type === "custom" && entry.customType === "shadow-mind-run-end"),
+      };
+    });
+    expect(result.reason).toBe("silent");
+    expect(markers).toHaveLength(2);
+    expect(markers.every(({ starts, ends }) => starts.length === 1 && ends.length === 1)).toBe(true);
+    expect(markers.map(({ ends }) => ends[0].data.attempt).sort()).toEqual([1, 2]);
+    expect(mock.sessions.every((session) => session.disposed)).toBe(true);
   });
 
   it("reports aborted when the run is cancelled externally", async () => {

@@ -64,6 +64,8 @@ export function serializeShadow(shadow: ShadowDraft): string {
     active_for_models: shadow.activeForModels ?? ["*"],
     ...(shadow.runWithModel ? { run_with_model: shadow.runWithModel } : {}),
     ...(shadow.thinkingLevel ? { thinking_level: shadow.thinkingLevel } : {}),
+    ...(shadow.fallbackModel ? { fallback_model: shadow.fallbackModel } : {}),
+    ...(shadow.fallbackModelThinkingLevel ? { fallback_model_thinking_level: shadow.fallbackModelThinkingLevel } : {}),
     ...(shadow.timeoutSeconds !== undefined ? { timeout_seconds: shadow.timeoutSeconds } : {}),
     tools: shadow.tools ?? [],
   };

@@ -89,8 +89,40 @@ type ShadowSession = Awaited<ReturnType<typeof createAgentSession>>["session"];
 
 interface RunState {
   reported: boolean;
-  timedOut: boolean;
   session?: ShadowSession;
+}
+
+interface RunBudget {
+  timeoutMs: number;
+  timedOut: boolean;
+  timer?: ReturnType<typeof setTimeout>;
+}
+
+interface RunCandidate {
+  resolveModel(): Model<any>;
+  thinkingLevel?: ThinkingLevel;
+}
+
+interface PreparedAttempt {
+  session: ShadowSession;
+  missingTools: string[];
+  baseMessageCount: number;
+  thinkingLevel: string;
+  abortHandler?: () => void;
+}
+
+interface AttemptContext {
+  request: ShadowRunRequest;
+  controller: AbortController;
+  trajectory: string;
+  candidate: RunCandidate;
+  budget: RunBudget;
+  attemptIndex: number;
+  started: number;
+  state: RunState;
+  model?: Model<any>;
+  sessionManager?: SessionManager;
+  prepared?: PreparedAttempt;
 }
 
 function runReason(timedOut: boolean, reported: boolean, aborted: boolean, failed = false): ShadowRunResult["reason"] {
@@ -132,49 +164,149 @@ export class ShadowRunner {
   async run(request: ShadowRunRequest): Promise<ShadowRunResult> {
     const started = Date.now();
     const controller = new AbortController();
+    const budget: RunBudget = {
+      timeoutMs: (request.shadow.timeoutSeconds ?? request.config.defaultShadowTimeoutSeconds) * 1000,
+      timedOut: false,
+    };
     this.controllers.set(request.runId, { controller });
-    const state: RunState = { reported: false, timedOut: false };
     let finalReason: ShadowRunResult["reason"] = "error";
-    let sessionManager: SessionManager | undefined;
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    let missingTools: string[] = [];
-    let baseMessageCount = 0;
-    let thinkingLevel: string | undefined;
     try {
-      const model = resolveRunModel(request);
-      assertShadowModelAuth(model, request);
       const trajectory = serializeTrajectory(request.messages);
-      assertTrajectoryFits(model, [trajectory]);
-      sessionManager = await createShadowSessionManager(request);
-      const boot = await this.bootstrapSession(request, model, controller, state, sessionManager);
-      state.session = boot.session;
-      missingTools = boot.missingTools;
-      thinkingLevel = boot.thinkingLevel;
-      baseMessageCount = boot.session.messages.length;
-      this.controllers.set(request.runId, { controller, session: boot.session });
-      if (controller.signal.aborted) {
-        finalReason = "aborted";
-        return buildRunResult({ reason: finalReason, durationMs: Date.now() - started, session: boot.session, baseMessageCount, missingTools, thinkingLevel });
+      const candidates: RunCandidate[] = [{
+        resolveModel: () => resolveRunModel(request),
+        thinkingLevel: request.shadow.thinkingLevel,
+      }];
+      if (request.shadow.fallbackModel) {
+        candidates.push({
+          resolveModel: () => resolveFallbackModel(request),
+          thinkingLevel: request.shadow.fallbackModelThinkingLevel ?? request.shadow.thinkingLevel,
+        });
       }
-      const timeoutMs = (request.shadow.timeoutSeconds ?? request.config.defaultShadowTimeoutSeconds) * 1000;
-      timeout = setTimeout(() => {
-        state.timedOut = true;
-        controller.abort();
-        void boot.session?.abort();
-      }, timeoutMs);
-      controller.signal.addEventListener("abort", () => void boot.session?.abort(), { once: true });
-      await boot.session.prompt(buildShadowRequest(trajectory, request.shadow));
-      await boot.session.waitForIdle();
-      finalReason = runReason(state.timedOut, state.reported, controller.signal.aborted);
-      return buildRunResult({ reason: finalReason, durationMs: Date.now() - started, session: boot.session, baseMessageCount, missingTools, thinkingLevel });
+
+      let result: ShadowRunResult | undefined;
+      for (let index = 0; index < candidates.length; index += 1) {
+        result = await this.runAttempt({
+          request,
+          controller,
+          trajectory,
+          candidate: candidates[index],
+          budget,
+          attemptIndex: index,
+          started: Date.now(),
+          state: { reported: false },
+        });
+        if (result.reason !== "error" || index === candidates.length - 1 || controller.signal.aborted) break;
+      }
+      if (!result) throw new Error("shadow run produced no result");
+      finalReason = result.reason;
+      return { ...result, durationMs: Date.now() - started };
     } catch (error) {
-      finalReason = runReason(state.timedOut, state.reported, controller.signal.aborted, true);
-      return buildRunResult({ reason: finalReason, error: error instanceof Error ? error.message : String(error), durationMs: Date.now() - started, session: state.session, baseMessageCount, missingTools, thinkingLevel });
+      finalReason = budget.timedOut ? "timeout" : controller.signal.aborted ? "aborted" : "error";
+      return buildRunResult({
+        reason: finalReason,
+        error: error instanceof Error ? error.message : String(error),
+        durationMs: Date.now() - started,
+        baseMessageCount: 0,
+        missingTools: [],
+      });
     } finally {
-      if (timeout) clearTimeout(timeout);
-      sessionManager?.appendCustomEntry("shadow-mind-run-end", { runId: request.runId, reason: finalReason, durationMs: Date.now() - started });
-      state.session?.dispose();
+      if (budget.timer) clearTimeout(budget.timer);
       this.controllers.delete(request.runId);
+    }
+  }
+
+  private async runAttempt(context: AttemptContext): Promise<ShadowRunResult> {
+    const { request, controller, trajectory, candidate, budget } = context;
+    let finalReason: ShadowRunResult["reason"] = "error";
+    try {
+      if (controller.signal.aborted) {
+        finalReason = budget.timedOut ? "timeout" : "aborted";
+        return buildRunResult({ reason: finalReason, durationMs: Date.now() - context.started, baseMessageCount: 0, missingTools: [] });
+      }
+      const model = candidate.resolveModel();
+      context.model = model;
+      assertShadowModelAuth(model, request);
+      assertTrajectoryFits(model, [trajectory]);
+      context.sessionManager = await createShadowSessionManager(request, context.attemptIndex, model);
+      context.prepared = await this.prepareAttempt(context);
+      if (controller.signal.aborted) {
+        finalReason = budget.timedOut ? "timeout" : "aborted";
+        return buildRunResult({ reason: finalReason, durationMs: Date.now() - context.started, session: context.prepared.session, baseMessageCount: context.prepared.baseMessageCount, missingTools: context.prepared.missingTools, thinkingLevel: context.prepared.thinkingLevel });
+      }
+      const result = await this.executeAttempt(context);
+      finalReason = result.reason;
+      return result;
+    } catch (error) {
+      finalReason = runReason(budget.timedOut, context.state.reported, controller.signal.aborted, true);
+      return buildRunResult({
+        reason: finalReason,
+        error: error instanceof Error ? error.message : String(error),
+        durationMs: Date.now() - context.started,
+        session: context.prepared?.session ?? context.state.session,
+        baseMessageCount: context.prepared?.baseMessageCount ?? 0,
+        missingTools: context.prepared?.missingTools ?? [],
+        thinkingLevel: context.prepared?.thinkingLevel,
+      });
+    } finally {
+      this.finalizeAttempt(context, finalReason);
+    }
+  }
+
+  private async prepareAttempt(context: AttemptContext): Promise<PreparedAttempt> {
+    const { request, controller, candidate, state, sessionManager, model } = context;
+    if (!model || !sessionManager) throw new Error("shadow attempt was not initialized");
+    const boot = await this.bootstrapSession(request, model, controller, state, sessionManager, candidate.thinkingLevel);
+    state.session = boot.session;
+    const prepared: PreparedAttempt = {
+      session: boot.session,
+      missingTools: boot.missingTools,
+      baseMessageCount: boot.session.messages.length,
+      thinkingLevel: boot.thinkingLevel,
+    };
+    this.controllers.set(request.runId, { controller, session: boot.session });
+    return prepared;
+  }
+
+  private async executeAttempt(context: AttemptContext): Promise<ShadowRunResult> {
+    const { request, controller, trajectory, budget, state, started } = context;
+    const attempt = context.prepared;
+    if (!attempt) throw new Error("shadow attempt was not prepared");
+    if (controller.signal.aborted) {
+      const reason = budget.timedOut ? "timeout" : "aborted";
+      return buildRunResult({ reason, durationMs: Date.now() - started, session: attempt.session, baseMessageCount: attempt.baseMessageCount, missingTools: attempt.missingTools, thinkingLevel: attempt.thinkingLevel });
+    }
+    if (!budget.timer) {
+      budget.timer = setTimeout(() => {
+        budget.timedOut = true;
+        controller.abort();
+        void this.controllers.get(request.runId)?.session?.abort();
+      }, budget.timeoutMs);
+    }
+    attempt.abortHandler = () => void attempt.session.abort();
+    controller.signal.addEventListener("abort", attempt.abortHandler, { once: true });
+    await attempt.session.prompt(buildShadowRequest(trajectory, request.shadow));
+    await attempt.session.waitForIdle();
+    const error = findAssistantRunError(attempt.session.messages.slice(attempt.baseMessageCount));
+    const reason = runReason(budget.timedOut, state.reported, controller.signal.aborted, error !== undefined);
+    return buildRunResult({ reason, ...(error !== undefined ? { error } : {}), durationMs: Date.now() - started, session: attempt.session, baseMessageCount: attempt.baseMessageCount, missingTools: attempt.missingTools, thinkingLevel: attempt.thinkingLevel });
+  }
+
+  private finalizeAttempt(context: AttemptContext, reason: ShadowRunResult["reason"]): void {
+    const { request, controller, state, sessionManager, model, prepared, attemptIndex, started } = context;
+    if (prepared?.abortHandler) controller.signal.removeEventListener("abort", prepared.abortHandler);
+    sessionManager?.appendCustomEntry("shadow-mind-run-end", {
+      runId: request.runId,
+      epoch: request.epoch,
+      shadowId: request.shadow.id,
+      attempt: attemptIndex + 1,
+      reason,
+      durationMs: Date.now() - started,
+      ...(model ? { model: `${model.provider}/${model.id}` } : {}),
+    });
+    state.session?.dispose();
+    const current = this.controllers.get(request.runId);
+    if (current?.controller === controller && current.session === state.session) {
+      this.controllers.set(request.runId, { controller });
     }
   }
 
@@ -185,9 +317,18 @@ export class ShadowRunner {
     controller: AbortController,
     state: RunState,
     sessionManager: SessionManager,
+    thinkingLevelOverride?: ThinkingLevel,
   ): Promise<{ session: ShadowSession; missingTools: string[]; thinkingLevel: string }> {
-    const thinkingLevel = resolveRunThinkingLevel(model, request);
+    const thinkingLevel = resolveRunThinkingLevel(model, request, thinkingLevelOverride);
     const settingsManager = SettingsManager.create(request.cwd, request.agentDir);
+    settingsManager.applyOverrides({
+      retry: {
+        enabled: true,
+        maxRetries: 1,
+        baseDelayMs: 15000,
+        provider: { maxRetries: 0, maxRetryDelayMs: 0 },
+      },
+    });
     const resourceLoader = new DefaultResourceLoader({
       cwd: request.cwd,
       agentDir: request.agentDir,
@@ -201,7 +342,8 @@ export class ShadowRunner {
       skillsOverride: (base) => ({ skills: [], diagnostics: base.diagnostics }),
       extensionsOverride: (base) => ({
         ...base,
-        extensions: base.extensions.filter((extension) => !isSelfExtension(extension.resolvedPath)),
+        extensions: base.extensions.filter((extension) =>
+          !isSelfExtension(extension.resolvedPath) && !isPiRetryExtension(extension.resolvedPath)),
       }),
     });
     const reportTool = createReportTool((content) => {
@@ -259,6 +401,19 @@ export function toolMetrics(messages: readonly { role?: string; toolName?: strin
   };
 }
 
+function findAssistantRunError(messages: readonly unknown[]): string | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!message || typeof message !== "object" || (message as { role?: unknown }).role !== "assistant") continue;
+    const assistant = message as { stopReason?: unknown; errorMessage?: unknown };
+    if (assistant.stopReason !== "error") return undefined;
+    return typeof assistant.errorMessage === "string" && assistant.errorMessage.trim()
+      ? assistant.errorMessage
+      : "shadow model returned an error";
+  }
+  return undefined;
+}
+
 function createReportTool(onReport: (content: string) => void): ToolDefinition {
   return {
     name: "report_to_main",
@@ -274,18 +429,34 @@ function createReportTool(onReport: (content: string) => void): ToolDefinition {
   };
 }
 
-async function createShadowSessionManager(request: ShadowRunRequest): Promise<SessionManager> {
+async function createShadowSessionManager(request: ShadowRunRequest, attemptIndex: number, model: Model<any>): Promise<SessionManager> {
   if (!request.shadow.debug) return SessionManager.inMemory(request.cwd);
   const directory = join(request.agentDir, "shadow-minds", "logs", request.shadow.id);
   await mkdir(directory, { recursive: true });
   const manager = SessionManager.create(request.cwd, directory);
-  manager.appendCustomEntry("shadow-mind-run", { runId: request.runId, epoch: request.epoch, shadowId: request.shadow.id });
+  manager.appendCustomEntry("shadow-mind-run", {
+    runId: request.runId,
+    epoch: request.epoch,
+    shadowId: request.shadow.id,
+    attempt: attemptIndex + 1,
+    model: `${model.provider}/${model.id}`,
+  });
   return manager;
 }
 
 function resolveRunModel(request: ShadowRunRequest): Model<any> {
   const fullId = request.shadow.runWithModel ?? request.config.defaultShadowModel;
   if (!fullId) return request.mainModel;
+  return resolveConfiguredModel(fullId, request);
+}
+
+function resolveFallbackModel(request: ShadowRunRequest): Model<any> {
+  const fullId = request.shadow.fallbackModel;
+  if (!fullId) throw new Error("fallback model is not configured");
+  return resolveConfiguredModel(fullId, request);
+}
+
+function resolveConfiguredModel(fullId: string, request: ShadowRunRequest): Model<any> {
   const model = request.resolveModel(fullId);
   if (!model) throw new Error(`shadow model not found: ${fullId}`);
   return model;
@@ -303,8 +474,8 @@ function assertShadowModelAuth(model: Model<any>, request: ShadowRunRequest): vo
  * (per its thinkingLevelMap; null marks unsupported, a missing key or map means
  * provider default, i.e. supported) wins. Fails only when none are supported.
  */
-export function resolveRunThinkingLevel(model: Model<any>, request: ShadowRunRequest): ThinkingLevel {
-  const candidates = [request.shadow.thinkingLevel, request.config.defaultThinkingLevel, request.mainThinkingLevel]
+export function resolveRunThinkingLevel(model: Model<any>, request: ShadowRunRequest, thinkingLevelOverride = request.shadow.thinkingLevel): ThinkingLevel {
+  const candidates = [thinkingLevelOverride, request.config.defaultThinkingLevel, request.mainThinkingLevel]
     .filter((level): level is ThinkingLevel => level !== undefined);
   for (const level of candidates) {
     if (model.thinkingLevelMap?.[level] !== null) return level;
@@ -325,4 +496,8 @@ function isSelfExtension(candidate: string): boolean {
   if (normalized === SELF_PATH) return true;
   const sourceDirectory = normalize(resolve(dirname(SELF_PATH)));
   return dirname(normalized) === sourceDirectory && (basename(normalized) === "index.ts" || basename(normalized) === "index.js");
+}
+
+function isPiRetryExtension(candidate: string): boolean {
+  return normalize(resolve(candidate)).toLowerCase().split(/[\\/]/).includes("pi-retry");
 }
