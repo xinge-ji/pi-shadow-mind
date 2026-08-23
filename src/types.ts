@@ -11,6 +11,7 @@ export interface ShadowConfig {
   defaultShadowModel?: string;
   defaultThinkingLevel: ThinkingLevel;
   randomSeed?: number;
+  turnWeights: Record<string, number>;
 }
 
 export interface ShadowDefinition {
@@ -24,10 +25,20 @@ export interface ShadowDefinition {
   thinkingLevel?: ThinkingLevel;
   fallbackModel?: string;
   fallbackModelThinkingLevel?: ThinkingLevel;
+  minRoundsAfterEnd?: number;
+  maxRoundsAfterEnd?: number;
   timeoutSeconds?: number;
   tools: string[];
   prompt: string;
   filePath: string;
+}
+
+export type ShadowScheduleDisposition = "cooldown" | "normal" | "forced";
+
+export interface ShadowScheduleState {
+  progressSinceEnd: number;
+  forcedPending: boolean;
+  disposition: ShadowScheduleDisposition;
 }
 
 export interface RegistryDiagnostic {
@@ -57,12 +68,27 @@ export interface RuntimeEvent {
   data?: Record<string, unknown>;
 }
 
+export interface HeartbeatActivation {
+  shadow: ShadowDefinition;
+  roll?: number;
+  forced: boolean;
+}
+
+export interface HeartbeatCandidate {
+  shadowId: string;
+  roll?: number;
+  selected: boolean;
+  forced: boolean;
+}
+
 export interface HeartbeatDecision {
   heartbeatRoll: number;
-  activated: Array<{ shadow: ShadowDefinition; roll: number }>;
-  candidates: Array<{ shadowId: string; roll: number; selected: boolean }>;
+  activated: HeartbeatActivation[];
+  candidates: HeartbeatCandidate[];
   /** Shadow ids excluded because active_for_models did not match the main model. */
   modelFiltered: string[];
   /** Shadow ids excluded because the same shadow is already running. */
   runningExcluded: string[];
+  /** Shadow ids excluded by their configured minimum interval. */
+  cooldownExcluded: string[];
 }

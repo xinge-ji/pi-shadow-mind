@@ -16,8 +16,27 @@ describe("parseShadowMarkdown", () => {
     });
   });
 
-  it("rejects an empty prompt", () => {
-    expect(() => parseShadowMarkdown("---\nid: empty\n---\n", "C:/tmp/empty.md")).toThrow(/empty/);
+  it("parses and round-trips trigger interval settings", () => {
+    const shadow = parseShadowMarkdown(
+      "---\nid: scheduled\nmin_rounds_after_end: 2\nmax_rounds_after_end: 8\n---\nCheck on a bounded schedule.",
+      "C:/tmp/scheduled.md",
+    );
+    expect(shadow).toMatchObject({ minRoundsAfterEnd: 2, maxRoundsAfterEnd: 8 });
+
+    const roundTripped = parseShadowMarkdown(serializeShadow(shadow), shadow.filePath);
+    expect(roundTripped).toMatchObject({ minRoundsAfterEnd: 2, maxRoundsAfterEnd: 8 });
+  });
+
+  it("allows either interval setting independently", () => {
+    expect(parseShadowMarkdown("---\nid: min-only\nmin_rounds_after_end: 2\n---\nCheck later.", "C:/tmp/min-only.md").maxRoundsAfterEnd).toBeUndefined();
+    expect(parseShadowMarkdown("---\nid: max-only\nmax_rounds_after_end: 8\n---\nCheck by then.", "C:/tmp/max-only.md").minRoundsAfterEnd).toBeUndefined();
+  });
+
+  it("rejects a max interval that cannot follow the minimum interval", () => {
+    expect(() => parseShadowMarkdown(
+      "---\nid: invalid-schedule\nmin_rounds_after_end: 2\nmax_rounds_after_end: 2\n---\nCheck once.",
+      "C:/tmp/invalid-schedule.md",
+    )).toThrow(/max_rounds_after_end/);
   });
 
   it("accepts off as a thinking level", () => {

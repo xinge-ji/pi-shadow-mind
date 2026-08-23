@@ -37,6 +37,37 @@ describe("decideHeartbeat", () => {
     expect(result.activated).toEqual([]);
   });
 
+  it("forces a due Shadow despite both probability gates", () => {
+    const due = { ...shadow("due", 0), maxRoundsAfterEnd: 3 };
+    const result = decideHeartbeat({
+      heartbeatProbability: 0,
+      availableSlots: 1,
+      shadows: [due],
+      activeShadowIds: new Set(),
+      mainModelId: "openai/gpt",
+      scheduleStates: new Map([["due", { progressSinceEnd: 3, forcedPending: true, disposition: "forced" as const }]]),
+      random: () => 0.99,
+    });
+    expect(result.activated).toEqual([{ shadow: due, forced: true }]);
+    expect(result.candidates).toEqual([{ shadowId: "due", selected: true, forced: true }]);
+  });
+
+  it("keeps due Shadows pending when all slots are occupied", () => {
+    const due = { ...shadow("due", 0), maxRoundsAfterEnd: 3 };
+    const states = new Map([["due", { progressSinceEnd: 3, forcedPending: true, disposition: "forced" as const }]]);
+    const result = decideHeartbeat({
+      heartbeatProbability: 0,
+      availableSlots: 0,
+      shadows: [due],
+      activeShadowIds: new Set(["other"]),
+      mainModelId: "openai/gpt",
+      scheduleStates: states,
+      random: () => 0.99,
+    });
+    expect(result.activated).toEqual([]);
+    expect(result.candidates).toEqual([{ shadowId: "due", selected: false, forced: true }]);
+  });
+
   it("reports running-excluded and model-filtered shadows", () => {
     const result = decideHeartbeat({
       heartbeatProbability: 1,

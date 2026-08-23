@@ -54,6 +54,8 @@ Create `~/.pi/agent/shadow-minds/architecture-review.md`:
 id: architecture-review
 name: Architecture review
 activation_probability: 0.3
+min_rounds_after_end: 2
+max_rounds_after_end: 8
 active_for_models: ["*"]
 tools: [read, grep]
 ---
@@ -71,9 +73,34 @@ repository. If the current work is unrelated, do not intervene.
 
 This Shadow is read-only. It reviews the implementation in parallel and reports concrete architectural concerns without taking control of the main task.
 
+### Configure a fallback model
+
+Use `run_with_model` to choose the primary model for a Shadow, and optionally set `fallback_model` for one retry when the primary attempt cannot start or returns an error. The fallback creates a fresh Shadow session; timeouts, external aborts, silent completion, and an already-submitted report do not trigger a fallback retry.
+
+```markdown
+---
+id: resilient-review
+name: Resilient review
+run_with_model: openai/gpt-5-mini
+thinking_level: high
+fallback_model: anthropic/claude-sonnet-4
+fallback_model_thinking_level: medium
+active_for_models: ["*"]
+tools: [read, grep]
+---
+
+Review the implementation and report only concrete findings.
+```
+
+Model values should use the full `provider/model-id` form and must be available and authenticated in Pi. `fallback_model_thinking_level` is optional; when omitted, the fallback reuses `thinking_level` and then applies the normal thinking-level fallback rules. If `fallback_model` is omitted, the Shadow does not retry with another model.
+
 ### How it works
 
 After a main-agent `turn_end` that completed at least one tool call, the extension evaluates a heartbeat. Pure text-only conversation turns are skipped, so ordinary discussion does not wake Shadows. By default, eligible turns fire a heartbeat with probability `1/3`; Shadow Minds then roll independently using their own activation probabilities, with at most two running concurrently.
+
+A Shadow can optionally set `min_rounds_after_end` and/or `max_rounds_after_end`. Eligible tool turns advance the Shadow by the highest configured `turn_weights` value among that turn's tools; multiple tools in one turn are not added together. The first N weighted units are blocked by the minimum; when the maximum is reached, that Shadow bypasses both probability gates and is forced to run. These settings also apply from the beginning of a session, before the Shadow has run once. If all slots are occupied, the forced Shadow remains pending and is started first when a slot is released; it never exceeds the global parallelism limit.
+
+Global `turn_weights` defaults are `read/grep/find/ls: 0.25`, `edit/write: 1`, `bash/shell: 0.5`, and unknown tools: `default: 1`. The weights only affect Shadow min/max progress; normal activation still uses `heartbeat_probability × activation_probability`. A zero-weight tool turn still evaluates heartbeat but does not advance that progress.
 
 Each activation starts a fresh temporary session. It inherits the main agent's unchanged system prompt but receives only a sanitized plain-text trajectory: assistant thinking is removed, while tool calls retain compact, deterministic result summaries.
 
@@ -153,6 +180,8 @@ Shadow Mind 可以保持只读，只向主 Agent 汇报发现；也可以获得�
 id: architecture-review
 name: Architecture review
 activation_probability: 0.3
+min_rounds_after_end: 2
+max_rounds_after_end: 8
 active_for_models: ["*"]
 tools: [read, grep]
 ---
@@ -169,9 +198,34 @@ tools: [read, grep]
 
 这个 Shadow 默认只读。它会在实现过程中并行审阅架构，并向主 Agent 报告具体问题，但不会接管主任务。
 
+### 配置 fallback 模型
+
+使用 `run_with_model` 指定 Shadow 的首选模型，并可通过 `fallback_model` 配置备用模型。当首选模型无法启动或运行返回 `error` 时，插件会使用备用模型重新创建一个 Shadow Session，并且只重试一次。超时、外部中止、静默结束或已经提交报告，都不会触发 fallback 重试。
+
+```markdown
+---
+id: resilient-review
+name: Resilient review
+run_with_model: openai/gpt-5-mini
+thinking_level: high
+fallback_model: anthropic/claude-sonnet-4
+fallback_model_thinking_level: medium
+active_for_models: ["*"]
+tools: [read, grep]
+---
+
+审阅当前实现，只报告具体的问题。
+```
+
+模型值应使用完整的 `provider/model-id` 格式，并且该模型需要已在 Pi 中可用且完成认证。`fallback_model_thinking_level` 是可选项；省略时，fallback 会继承 `thinking_level`，然后按常规规则回退 thinking level。如果省略 `fallback_model`，Shadow 不会切换到其他模型重试。
+
 ### 工作方式
 
 主 Agent 的一次 `turn_end` 只有在该轮至少完成过一个工具调用时，扩展才进行 heartbeat 判断。纯文本对话轮次会被跳过，因此普通讨论不会唤醒 Shadow。符合条件的轮次默认以 `1/3` 的概率触发 heartbeat，Shadow Minds 再按照各自的激活概率独立抽选，默认最多同时运行两个。
+
+Shadow 可以分别设置可选的 `min_rounds_after_end` 和 `max_rounds_after_end`。每个有效工具轮次只取该轮最高的 `turn_weights` 作为进度，不累加同一轮中的多个工具。前 N 个加权单位禁止触发；达到最大进度后绕过两层概率强制触发。会话刚开始、Shadow 尚未运行过时也从第一个有效轮次开始遵守配置。槽位已满时保留强制触发状态，等任意 Shadow 结束释放槽位后优先启动，但不会突破全局并发上限。
+
+全局默认权重为 `read/grep/find/ls: 0.25`、`edit/write: 1`、`bash/shell: 0.5`，未知工具使用 `default: 1`。权重只影响 Shadow 的 min/max 进度，普通调度仍使用 `heartbeat_probability × activation_probability`；权重为 `0` 的工具轮仍会参与 heartbeat，但不推进进度。
 
 每次激活都会创建一个全新的临时 Session。它继承主 Agent 原封不动的 system prompt，但只接收净化后的文本轨迹：思考内容会被移除，工具调用后仅保留简洁、确定性的结果概述。
 

@@ -63,7 +63,7 @@ Shadow 的 Markdown 定义持久存在，但运行实例不保留长期记忆。
 
 该目录属于用户数据，不放入插件安装目录，也不随当前项目切换。插件级配置保存在 `config.json`；registry 只扫描目录顶层的 `.md` 文件，不读取 `config.json`，也不递归读取 `logs/`。
 
-`config.json` 保存默认 Shadow 模型、`default_thinking_level`、`heartbeat_probability`、`max_parallel_shadows`、`default_shadow_timeout_seconds` 和 `result_batch_window_ms` 等全局调度配置。`default_shadow_model` 省略时，插件使用激活时的当前 Main 模型；用户也可以配置一个固定默认模型。`default_thinking_level` 的内置默认值为 `low`。
+`config.json` 保存默认 Shadow 模型、`default_thinking_level`、`heartbeat_probability`、`max_parallel_shadows`、`default_shadow_timeout_seconds`、`result_batch_window_ms` 和 `turn_weights` 等全局调度配置。`default_shadow_model` 省略时，插件使用激活时的当前 Main 模型；用户也可以配置一个固定默认模型。`default_thinking_level` 的内置默认值为 `low`。`turn_weights` 按 Main 工具名配置有效轮次权重；默认 `read`、`grep`、`find`、`ls` 为 `0.25`，`edit`、`write` 为 `1`，`bash`、`shell` 为 `0.5`，未知工具使用 `default: 1`。权重允许为 `0`。
 
 每次符合调度条件的 Main `turn_end` 进行 heartbeat 判断前，插件检查并重新加载发生变化的 `config.json`。纯文本轮次不会进入 heartbeat。新配置只影响后续调度和新建实例；已经运行的 Shadow 继续使用启动时取得的配置快照。
 
@@ -112,10 +112,12 @@ active_for_models:
 | `thinking_level` | Shadow 首次运行使用的 thinking level；省略时使用插件默认值，再回退到 Main 会话当前生效等级 |
 | `fallback_model` | 首次运行返回 `error` 时重试使用的模型；省略时不重试 |
 | `fallback_model_thinking_level` | fallback 重试使用的 thinking level；省略时继承 `thinking_level`，再按常规候选回退 |
+| `min_rounds_after_end` | Shadow 上次运行结束后，前 N 个符合条件的 Main 工具轮次禁止再次触发；省略时不启用最小间隔 |
+| `max_rounds_after_end` | Shadow 上次运行结束后，达到第 N 个符合条件的 Main 工具轮次仍未触发时强制触发；省略时不启用截止触发 |
 | `timeout_seconds` | Shadow 单次运行超时；省略时使用插件默认超时 |
 | `tools` | 在 Pi SDK `readOnlyTools` 之上追加的工具白名单；默认 `[]` |
 
-`name` 只用于 `shadow-report` 和状态界面展示，不参与身份判断；省略时回退到最终解析出的 `id`。Markdown 正文就是 Shadow 的认知定义、长期职责和行为要求。
+Shadow 的可选轮次策略只统计包含 Main 工具结果的 eligible `turn_end`。`min_rounds_after_end` 和 `max_rounds_after_end` 可以分别省略，也可以只配置其中一个；如果同时配置，`max_rounds_after_end` 必须大于 `min_rounds_after_end`。会话开始时没有历史运行实例也从第一个 eligible 轮次开始计数，因此 `min_rounds_after_end: 2` 会禁止前两轮、从第三轮开始恢复普通概率，`max_rounds_after_end: 8` 会在第八轮强制触发。
 
 `active_for_models` 绑定的是被观察的 Main 模型，`run_with_model` 则指定 Shadow 首次运行时使用的模型。匹配前由 Pi 将 Main 的别名或简写解析为完整 `provider/model-id`；第一版只支持该完整 ID 和精确值 `"*"`，不引入其他通配、正则、标签或复杂条件。首次运行的模型选择优先级为：Shadow 的 `run_with_model` → 插件的 `default_shadow_model` → 激活时的当前 Main 模型。
 
@@ -293,22 +295,24 @@ P(heartbeat after eligible tool-bearing turn) = heartbeat_probability
 default heartbeat_probability = 1 / 3
 ```
 
-纯文本轮次直接跳过，不消耗随机数，也不启动 Shadow。这会压制普通问答、方案讨论和 Shadow 报告后的纯文本回应产生的无效唤醒。带工具调用的中间轮次仍参与判断，因此 Main 一旦开始读取、验证或修改项目，Shadow 仍可并行介入。Shadow AgentSession 自己的 `turn_end` 不参与 Main heartbeat。
+纯文本轮次直接跳过，不消耗随机数，也不启动 Shadow。这会压制普通问答、方案讨论和 Shadow 报告后的纯文本回应产生的无效唤醒。带工具调用的中间轮次仍参与判断，因此 Main 一旦开始读取、验证或修改项目，Shadow 仍可并行介入。每个 eligible `turn_end` 根据其中工具结果的最高 `turn_weights` 计算一个 `turnWeight`；同一轮的多个工具不累加。该权重只推进 Shadow 的 `min_rounds_after_end` / `max_rounds_after_end` 进度，不改变普通路径的 `heartbeat_probability × activation_probability`。权重为 `0` 的工具轮仍然参与 heartbeat，只是不推进加权进度。Shadow AgentSession 自己的 `turn_end` 不参与 Main heartbeat。
 
 由 `shadow-report` 触发的 Main 补充或修正只有在实际调用工具时才重新获得 heartbeat 机会，避免纯文本报告与回应形成递归唤醒链。
 
-默认情况下，相邻 heartbeat 的期望间隔为 3 个符合条件的工具轮次，但实际间隔保持随机：可能连续发生，也可能较长时间不发生。
+默认情况下，相邻 heartbeat 的期望间隔为 3 个符合条件的工具轮次，但实际间隔保持随机：可能连续发生，也可能较长时间不发生。配置了 Shadow 轮次策略后，`min_rounds_after_end` / `max_rounds_after_end` 比较的是加权有效轮次进度；达到 max 时仍进入强制路径并绕过两层概率。
 
-第一版直接使用运行时随机数，不提供或持久化随机 seed，也不承诺重放同一调度序列。实际抽样值通过轻量调度事件保留，供事后分析。
+调度默认使用运行时随机数；可通过 `random_seed` 配置可重复的调度序列，实际抽样值仍通过轻量调度事件保留，供事后分析。
 
 heartbeat 发生时：
 
 1. 读取当前 Main 模型。
 2. 筛选 `enabled: true` 且 `active_for_models` 匹配的 Shadow。
 3. 排除当前正在运行的同一 Shadow。
-4. 每个剩余 Shadow 按自己的 `activation_probability` 独立判断是否激活。
-5. 如果命中项超过 `max_parallel_shadows`，从中随机选择允许的数量。
-6. 并行创建运行实例并传入各自的净化轨迹。
+4. 排除仍处于 `min_rounds_after_end` 冷却期的 Shadow。
+5. 对达到 `max_rounds_after_end` 或已经 `forcedPending` 的 Shadow 绕过 heartbeat/activation 概率，优先选择。
+6. 对其余 Shadow 按自己的 `activation_probability` 独立判断是否激活。
+7. 如果命中项超过 `max_parallel_shadows`，从中选择允许的数量。
+8. 并行创建运行实例并传入各自的净化轨迹。
 
 一次 heartbeat 可能不激活任何 Shadow，也可能激活一个或多个。一次 heartbeat 不等待 Shadow 完成，Main 继续工作。
 
@@ -318,9 +322,7 @@ heartbeat 发生时：
 available_slots = max_parallel_shadows - running_shadow_count
 ```
 
-如果没有剩余槽位，本次 heartbeat 不启动新的 Shadow。
-
-命中数量超过剩余槽位时，未被随机选中的 Shadow 直接跳过，不进入等待队列，也不保留本次轨迹快照。后续 heartbeat 会基于届时的最新上下文重新判断。
+当 Shadow 达到 `max_rounds_after_end` 但并发槽位已满时，插件记录 `forcedPending`，不突破 `max_parallel_shadows`。任意当前 epoch 的 Shadow 结束并释放槽位后，插件优先启动 pending Shadow；多个 pending Shadow 不按彼此等待时间排序，只按 registry 当前顺序选择，并继续受并发槽位限制。暂停或没有 Main 模型时不推进 eligible 轮次。
 
 `activation_probability` 表示 heartbeat 已经发生之后，该 Shadow 被选中的基础概率。因此某个 Shadow 在单次符合条件的 Main 工具轮次后获得激活机会的基础概率为：
 
@@ -410,6 +412,9 @@ max_parallel_shadows
 result_batch_window_ms
 default_shadow_timeout_seconds
 Shadow activation probabilities
+turn_weights
+per-Shadow weighted progress counters
+per-Shadow forced-pending state
 running Shadow IDs
 active Shadow runs and their start epoch
 lightweight Shadow run events in Main Session custom entries
@@ -425,7 +430,7 @@ Shadow 的临时 AgentSession 不跨激活复用，也不写回记忆。
 
 同一个 Shadow 在前一次实例仍运行时不重复激活；不同 Shadow 可以并行运行。
 
-前一次实例结束后，同一个 Shadow 可以在同一用户 epoch 内被后续 heartbeat 再次激活，不设置每 epoch 次数上限。每次仍创建全新的临时 AgentSession，并取得激活时刻的最新完整净化轨迹。
+如果配置了轮次策略，前一次实例结束后按 eligible 工具轮次推进该 Shadow 的独立计数。前 `min_rounds_after_end` 个轮次不会触发；达到 `max_rounds_after_end` 后进入强制触发状态。会话开始时没有上一次实例的 Shadow 也从第一个 eligible 轮次开始遵守该策略。
 
 ## 8. 第一版范围
 
@@ -443,6 +448,9 @@ Shadow 的临时 AgentSession 不跨激活复用，也不写回记忆。
 - 纯文本 Main 轮次跳过 heartbeat，只在完成工具调用的轮次参与调度；
 - 通过 `heartbeat_probability` 配置随机 heartbeat，默认概率为 `1/3`；
 - 每个 Shadow 按自己的概率参与 heartbeat；
+- 通过 `turn_weights` 配置工具类别的加权有效轮次，单个 `turn_end` 取最高权重；
+- 通过 `min_rounds_after_end` / `max_rounds_after_end` 可选配置每个 Shadow 的加权进度冷却和强制触发；
+- `max_rounds_after_end` 到期时绕过两层概率，槽位满载时保留 `forcedPending` 并在槽位释放后优先启动；
 - 通过 `max_parallel_shadows` 配置最大并行数量；
 - 构造净化轨迹；
 - 默认使用当前 Main Session 的全部净化历史；

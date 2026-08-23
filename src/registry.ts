@@ -75,6 +75,11 @@ export function parseShadowMarkdown(source: string, filePath: string): ShadowDef
   if (!ID_PATTERN.test(id)) throw new Error("id must match [a-z0-9][a-z0-9_-]*");
   const prompt = match[2].trim();
   if (!prompt) throw new Error("shadow prompt body is empty");
+  const minRoundsAfterEnd = optionalNonNegativeInteger(value.min_rounds_after_end, "min_rounds_after_end");
+  const maxRoundsAfterEnd = optionalPositiveInteger(value.max_rounds_after_end, "max_rounds_after_end");
+  if (minRoundsAfterEnd !== undefined && maxRoundsAfterEnd !== undefined && maxRoundsAfterEnd <= minRoundsAfterEnd) {
+    throw new Error("max_rounds_after_end must be greater than min_rounds_after_end");
+  }
   return {
     id,
     name: stringValue(value.name, id, "name"),
@@ -86,6 +91,8 @@ export function parseShadowMarkdown(source: string, filePath: string): ShadowDef
     thinkingLevel: optionalThinking(value.thinking_level, "thinking_level"),
     fallbackModel: optionalString(value.fallback_model, "fallback_model"),
     fallbackModelThinkingLevel: optionalThinking(value.fallback_model_thinking_level, "fallback_model_thinking_level"),
+    minRoundsAfterEnd,
+    maxRoundsAfterEnd,
     timeoutSeconds: optionalPositiveNumber(value.timeout_seconds, "timeout_seconds"),
     tools: stringArray(value.tools, [], "tools"),
     prompt,
@@ -114,6 +121,16 @@ function probabilityValue(value: unknown, fallback: number, name: string): numbe
 function optionalPositiveNumber(value: unknown, name: string): number | undefined {
   if (value === undefined) return undefined;
   if (!isFiniteNumber(value) || value <= 0) throw new Error(`${name} must be positive`);
+  return value;
+}
+function optionalNonNegativeInteger(value: unknown, name: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (!isFiniteNumber(value) || !Number.isInteger(value) || value < 0) throw new Error(`${name} must be a non-negative integer`);
+  return value;
+}
+function optionalPositiveInteger(value: unknown, name: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (!isFiniteNumber(value) || !Number.isInteger(value) || value <= 0) throw new Error(`${name} must be a positive integer`);
   return value;
 }
 function stringArray(value: unknown, fallback: string[], name: string): string[] {

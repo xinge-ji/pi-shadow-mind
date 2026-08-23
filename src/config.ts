@@ -4,6 +4,20 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ShadowConfig } from "./types.js";
 import { inRange, isFiniteNumber, isNonEmptyString, isThinkingLevel } from "./validation.js";
 
+export const DEFAULT_TURN_WEIGHTS: Record<string, number> = {
+  read: 0.25,
+  grep: 0.25,
+  ffgrep: 0.25,
+  find: 0.25,
+  fffind: 0.25,
+  ls: 0.25,
+  edit: 1,
+  write: 1,
+  bash: 0.5,
+  shell: 0.5,
+  default: 1,
+};
+
 export const DEFAULT_CONFIG: ShadowConfig = {
   heartbeatProbability: 1 / 3,
   maxParallelShadows: 2,
@@ -11,6 +25,7 @@ export const DEFAULT_CONFIG: ShadowConfig = {
   headlessDrainTimeoutSeconds: 120,
   resultBatchWindowMs: 400,
   defaultThinkingLevel: "low",
+  turnWeights: { ...DEFAULT_TURN_WEIGHTS },
 };
 
 export function parseConfig(input: unknown): ShadowConfig {
@@ -25,6 +40,7 @@ export function parseConfig(input: unknown): ShadowConfig {
   const windowMs = nonNegativeInteger(value.result_batch_window_ms, DEFAULT_CONFIG.resultBatchWindowMs, "result_batch_window_ms");
   const model = optionalNonEmptyString(value.default_shadow_model, "default_shadow_model");
   const randomSeed = optionalSeed(value.random_seed);
+  const turnWeights = parseTurnWeights(value.turn_weights, DEFAULT_CONFIG.turnWeights);
   const thinking = value.default_thinking_level ?? DEFAULT_CONFIG.defaultThinkingLevel;
   if (!isThinkingLevel(thinking)) {
     throw new Error("default_thinking_level is invalid");
@@ -38,6 +54,7 @@ export function parseConfig(input: unknown): ShadowConfig {
     defaultShadowModel: model,
     defaultThinkingLevel: thinking as ThinkingLevel,
     randomSeed,
+    turnWeights,
   };
 }
 
@@ -51,6 +68,7 @@ export function serializeConfig(config: ShadowConfig): string {
     ...(config.defaultShadowModel ? { default_shadow_model: config.defaultShadowModel } : {}),
     default_thinking_level: config.defaultThinkingLevel,
     ...(config.randomSeed !== undefined ? { random_seed: config.randomSeed } : {}),
+    turn_weights: config.turnWeights,
   }, null, 2)}\n`;
 }
 
@@ -130,4 +148,20 @@ function optionalSeed(value: unknown): number | undefined {
     throw new Error("random_seed must be an integer between 0 and 4294967295");
   }
   return value;
+}
+
+function parseTurnWeights(value: unknown, fallback: Readonly<Record<string, number>>): Record<string, number> {
+  if (value === undefined) return { ...fallback };
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("turn_weights must be an object");
+  }
+  const parsed = { ...fallback };
+  for (const [toolName, weight] of Object.entries(value)) {
+    if (!toolName.trim()) throw new Error("turn_weights contains an empty tool name");
+    if (!isFiniteNumber(weight) || weight < 0) {
+      throw new Error(`turn_weights.${toolName} must be non-negative`);
+    }
+    parsed[toolName] = weight;
+  }
+  return parsed;
 }

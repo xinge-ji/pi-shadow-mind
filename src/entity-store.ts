@@ -66,6 +66,8 @@ export function serializeShadow(shadow: ShadowDraft): string {
     ...(shadow.thinkingLevel ? { thinking_level: shadow.thinkingLevel } : {}),
     ...(shadow.fallbackModel ? { fallback_model: shadow.fallbackModel } : {}),
     ...(shadow.fallbackModelThinkingLevel ? { fallback_model_thinking_level: shadow.fallbackModelThinkingLevel } : {}),
+    ...(shadow.minRoundsAfterEnd !== undefined ? { min_rounds_after_end: shadow.minRoundsAfterEnd } : {}),
+    ...(shadow.maxRoundsAfterEnd !== undefined ? { max_rounds_after_end: shadow.maxRoundsAfterEnd } : {}),
     ...(shadow.timeoutSeconds !== undefined ? { timeout_seconds: shadow.timeoutSeconds } : {}),
     tools: shadow.tools ?? [],
   };
@@ -73,7 +75,10 @@ export function serializeShadow(shadow: ShadowDraft): string {
 }
 
 export function describeShadow(shadow: ShadowDefinition): string {
-  return `${shadow.enabled ? "enabled" : "disabled"} ${shadow.id} (${shadow.name}) p=${shadow.activationProbability} models=${shadow.activeForModels.join(",")} tools=${shadow.tools.join(",") || "default"} file=${basename(shadow.filePath)}`;
+  const schedule = shadow.minRoundsAfterEnd !== undefined || shadow.maxRoundsAfterEnd !== undefined
+    ? ` rounds=${shadow.minRoundsAfterEnd ?? 0}..${shadow.maxRoundsAfterEnd ?? "∞"}`
+    : "";
+  return `${shadow.enabled ? "enabled" : "disabled"} ${shadow.id} (${shadow.name}) p=${shadow.activationProbability}${schedule} models=${shadow.activeForModels.join(",")} tools=${shadow.tools.join(",") || "default"} file=${basename(shadow.filePath)}`;
 }
 
 function definedOnly<T extends object>(value: T): Partial<T> {

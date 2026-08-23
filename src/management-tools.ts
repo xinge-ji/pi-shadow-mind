@@ -16,6 +16,8 @@ const SHADOW_FIELDS = {
   thinking_level: Type.Optional(THINKING),
   fallback_model: Type.Optional(Type.String()),
   fallback_model_thinking_level: Type.Optional(THINKING),
+  min_rounds_after_end: Type.Optional(Type.Integer({ minimum: 0 })),
+  max_rounds_after_end: Type.Optional(Type.Integer({ minimum: 1 })),
   timeout_seconds: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
   tools: Type.Optional(Type.Array(Type.String())),
   prompt: Type.Optional(Type.String()),
@@ -89,6 +91,7 @@ function configWriteTool(store: EntityStore, getConfig: () => ShadowConfig): Too
     default_shadow_model: Type.Optional(Type.String()),
     default_thinking_level: Type.Optional(THINKING),
     random_seed: Type.Optional(Type.Integer({ minimum: 0, maximum: 0xffff_ffff })),
+    turn_weights: Type.Optional(Type.Record(Type.String(), Type.Number({ minimum: 0 }))),
   }), async (_id, params, _signal, _update, ctx) => {
     const current = getConfig();
     const raw = params as Record<string, unknown>;
@@ -101,6 +104,7 @@ function configWriteTool(store: EntityStore, getConfig: () => ShadowConfig): Too
       default_shadow_model: raw.default_shadow_model ?? current.defaultShadowModel,
       default_thinking_level: raw.default_thinking_level ?? current.defaultThinkingLevel,
       random_seed: raw.random_seed ?? current.randomSeed,
+      turn_weights: raw.turn_weights ?? current.turnWeights,
     });
     if (!(await confirm(ctx, "Update Shadow Config", `Apply this config?\n${JSON.stringify(next, null, 2)}`))) return textResult("Cancelled.");
     await store.writeConfig(next);
@@ -136,6 +140,8 @@ function toPatch(raw: Record<string, unknown>) {
     thinkingLevel: raw.thinking_level as any,
     fallbackModel: raw.fallback_model as string | undefined,
     fallbackModelThinkingLevel: raw.fallback_model_thinking_level as any,
+    minRoundsAfterEnd: raw.min_rounds_after_end as number | undefined,
+    maxRoundsAfterEnd: raw.max_rounds_after_end as number | undefined,
     timeoutSeconds: raw.timeout_seconds as number | undefined,
     tools: raw.tools as string[] | undefined,
     prompt: raw.prompt as string | undefined,
